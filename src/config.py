@@ -21,5 +21,5 @@ def get_settings() -> Settings:
     return Settings(
         api_key=api_key,
         model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
-        max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "1024")),
+        max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096")),
     )

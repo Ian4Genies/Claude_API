@@ -1,0 +1,13 @@
+name: prompt_01_head_tagging
+static_files:
+  - data/Prompt_01/Prompt - Authored Head Tagging.md
+  - data/Prompt_01/Prompt - Authored Head Atlas.md
+  - data/Prompt_01/Atlas_0_1024_1.png
+  - data/Prompt_01/Atlas_0_1024_2.png
+pair_folders:
+  left: data/Render_FrontView
+  right: data/Render_SideView
+  suffix_pattern: _grp_head_view_\d+$
+output_dir: output/prompt_01
+output_naming: "{pair_key}.json"
+skip_existing: true
