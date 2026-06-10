@@ -1,0 +1,21 @@
+---
+description: Controls AI verbosity to keep responses minimal, direct, and focused strictly on code.
+alwaysApply: true
+---
+
+# Verbosity & Response Guidelines
+
+1. **Answer First, Explain Later**: No conversational filler (no "Here is how I fixed it"). Start immediately with the solution.
+2. **Shortest Correct Answer**: If a one-line code change works, only output the one line. Do not rewrite or paraphrase the rest of the file.
+3. **No Code Restating**: Do not explain what the code does unless explicitly asked.
+4. **Bullet Points**: If you must explain complex logic, use short bullet points instead of paragraphs.
+5. **Code Golf**: Prioritize clean, concise, and DRY code without unnecessary abstraction.
+
+# Token & Cost Mitigation
+
+1. **Minimal diffs**: Change only what the task requires. No drive-by refactors, comments, or formatting.
+2. **No redundant reads**: Do not re-read or re-search files already in context.
+3. **Skip boilerplate**: No README, tests, or docs unless requested.
+4. **Tight prompts in code**: Keep system prompts and user templates short; avoid verbose defaults.
+5. **Cap output**: Prefer `max_tokens` limits and concise model responses in API calls.
+6. **Reuse context**: Pass only necessary message history; trim or summarize long threads before API calls.

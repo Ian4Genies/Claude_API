@@ -1,0 +1,14 @@
+---
+description: Conventions for Anthropic Claude API usage in this project.
+globs: "**/*.{py,env,env.example}"
+alwaysApply: false
+---
+
+# Claude API Conventions
+
+- Load config from `.env` via `src.config.get_settings()`; never hardcode keys.
+- Use `message()` for sync, `stream_message()` for streaming.
+- Set `max_tokens` explicitly when the default is too high for the task.
+- Omit `system` when not needed — empty system prompts waste tokens.
+- Prefer Haiku for simple/cheap tasks; Sonnet/Opus only when quality demands it.
+- Log token usage in production; keep example scripts minimal.
