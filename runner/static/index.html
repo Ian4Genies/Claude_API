@@ -4,78 +4,92 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Claude Batch Runner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <header>
-    <div>
-      <h1>Claude Batch Runner</h1>
-      <p>Pair folders, attach prompt assets, run vision jobs, save JSON outputs.</p>
+    <div class="brand">
+      <div class="logo">CB</div>
+      <div>
+        <h1>Claude Batch Runner</h1>
+        <p>Multimodal recipes · N-folder pairing · JSON extraction</p>
+      </div>
     </div>
-    <div class="actions">
+    <div class="header-actions">
+      <div class="history-group">
+        <button class="icon-btn" id="undoBtn" title="Undo (Ctrl+Z)" disabled>↶</button>
+        <button class="icon-btn" id="redoBtn" title="Redo (Ctrl+Y)" disabled>↷</button>
+      </div>
       <select id="recipeSelect"></select>
-      <button class="btn-secondary" id="loadRecipeBtn">Load Recipe</button>
+      <button class="btn-secondary" id="loadRecipeBtn">Load</button>
+      <button class="btn-secondary" id="saveRecipeBtn">Save</button>
     </div>
   </header>
 
   <main class="layout">
-    <section class="panel">
-      <h2>Recipe</h2>
-
-      <label>Recipe name</label>
-      <input id="recipeName" value="prompt_01_head_tagging" />
-
-      <label>Static files (every run)</label>
-      <div class="row">
-        <input id="staticFileInput" placeholder="data/Prompt_01/..." />
-        <button class="btn-secondary" id="addStaticBtn">Add</button>
-      </div>
-      <ul class="file-list" id="staticFiles"></ul>
-
-      <label>Left folder (e.g. front view)</label>
-      <div class="row">
-        <input id="leftFolder" value="data/Render_FrontView" />
-        <button class="btn-ghost" data-inspect="leftFolder">Inspect</button>
+    <aside class="panel sidebar">
+      <div class="panel-head">
+        <h2>Recipe</h2>
       </div>
 
-      <label>Right folder (e.g. side view)</label>
-      <div class="row">
-        <input id="rightFolder" value="data/Render_SideView" />
-        <button class="btn-ghost" data-inspect="rightFolder">Inspect</button>
+      <label>Name</label>
+      <input id="recipeName" data-track />
+
+      <div class="section">
+        <div class="section-head">
+          <label>Static assets</label>
+          <span class="chip">every run</span>
+        </div>
+        <div class="row">
+          <input id="staticFileInput" placeholder="data/Prompt_01/..." />
+          <button class="btn-secondary" id="browseStaticBtn" title="Browse files">Browse</button>
+          <button class="btn-secondary" id="addStaticBtn">Add</button>
+        </div>
+        <ul class="asset-list" id="staticFiles"></ul>
       </div>
 
-      <label>Pair suffix regex</label>
-      <input id="suffixPattern" value="_grp_head_view_\d+$" />
-      <p class="hint">Strips view angle suffix to match pairs across folders.</p>
+      <div class="section">
+        <div class="section-head">
+          <label>Pair folders</label>
+          <button class="btn-ghost sm" id="addFolderBtn">+ Folder</button>
+        </div>
+        <div id="folderList"></div>
+        <label>Suffix regex</label>
+        <input id="suffixPattern" value="_grp_head_view_\d+$" data-track />
+        <p class="hint">Strips angle suffix to match keys across all folders.</p>
+      </div>
 
-      <label>Output directory</label>
-      <input id="outputDir" value="output/prompt_01" />
+      <div class="section compact">
+        <label>Output directory</label>
+        <input id="outputDir" data-track />
+        <label>Output naming</label>
+        <input id="outputNaming" data-track />
+        <label class="check-row">
+          <input type="checkbox" id="skipExisting" checked data-track />
+          Skip existing outputs
+        </label>
+        <label>Run limit</label>
+        <input id="runLimit" type="number" min="1" placeholder="All pairs" data-track />
+      </div>
 
-      <label>Output naming</label>
-      <input id="outputNaming" value="{pair_key}.json" />
-
-      <label class="row" style="align-items:center; gap:0.4rem; margin-top:0.75rem;">
-        <input type="checkbox" id="skipExisting" checked style="width:auto;" />
-        Skip pairs with existing output
-      </label>
-
-      <div class="actions">
-        <button class="btn-secondary" id="scanBtn">Scan Pairs</button>
+      <div class="actions sticky-actions">
+        <button class="btn-secondary" id="scanBtn">Scan</button>
         <button class="btn-secondary" id="dryRunBtn">Dry Run</button>
         <button class="btn-primary" id="runBtn">Run Batch</button>
       </div>
+    </aside>
 
-      <label>Run limit (optional)</label>
-      <input id="runLimit" type="number" min="1" placeholder="All pairs" />
-    </section>
+    <section class="panel main-panel">
+      <div class="panel-head spread">
+        <h2>Pair Scan</h2>
+        <span class="hint" id="folderSummary">—</span>
+      </div>
 
-    <section class="panel">
-      <h2>Pair Scan</h2>
-      <div class="stats">
+      <div class="stats" id="statsRow">
         <div class="stat ok"><div class="value" id="statMatches">0</div><div class="label">Matches</div></div>
-        <div class="stat warn"><div class="value" id="statLeftOnly">0</div><div class="label">Left only</div></div>
-        <div class="stat warn"><div class="value" id="statRightOnly">0</div><div class="label">Right only</div></div>
-        <div class="stat"><div class="value" id="statStatus">—</div><div class="label">Consistency</div></div>
       </div>
 
       <div class="progress"><div id="progressBar"></div></div>
@@ -83,11 +97,9 @@
 
       <div class="table-wrap">
         <table>
-          <thead>
+          <thead id="pairsHead">
             <tr>
-              <th>Pair key</th>
-              <th>Left</th>
-              <th>Right</th>
+              <th>Key</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -98,6 +110,37 @@
       <div class="log" id="log"></div>
     </section>
   </main>
+
+  <footer class="preview-dock" id="previewDock">
+    <div class="preview-head">
+      <span id="previewTitle">Preview</span>
+      <button class="icon-btn sm" id="clearPreviewBtn" title="Clear">×</button>
+    </div>
+    <div class="preview-strip" id="previewStrip">
+      <div class="preview-empty">Select a static asset or pair row to preview</div>
+    </div>
+  </footer>
+
+  <div class="modal-backdrop hidden" id="browseModal">
+    <div class="modal panel">
+      <div class="modal-head">
+        <div>
+          <h3 id="browseTitle">Browse</h3>
+          <p class="hint" id="browseHint">Select a file or folder from the project</p>
+        </div>
+        <button class="icon-btn sm" id="browseCloseBtn">×</button>
+      </div>
+      <div class="breadcrumb" id="browseBreadcrumb"></div>
+      <div class="browse-list" id="browseList"></div>
+      <div class="modal-actions">
+        <span class="hint" id="browseSelection">—</span>
+        <div class="row modal-btns">
+          <button class="btn-ghost" id="browseSelectFolderBtn">Select folder</button>
+          <button class="btn-primary" id="browseConfirmBtn">Select</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.batch.extract import extract_json, output_name_from_pair_key, save_json_output
-from src.batch.pairing import PairMatch, scan_pair_folders
+from src.batch.pairing import PairMatch, scan_multi_folders
 from src.batch.recipe import BatchRecipe
 from src.batch.vision import vision_message
 from src.config import Settings, get_settings
@@ -59,14 +59,11 @@ class BatchRunner:
             raise ValueError("Recipe has no pair_folders configured")
 
         cfg = self.recipe.pair_folders
-        left = Path(cfg.left)
-        right = Path(cfg.right)
-        if not left.is_absolute():
-            left = self.base_dir / left
-        if not right.is_absolute():
-            right = self.base_dir / right
+        folder_entries = self.recipe.resolved_folder_entries(self.base_dir)
+        if len(folder_entries) < 2:
+            raise ValueError("Recipe needs at least two pair folders")
 
-        scan = scan_pair_folders(left, right, suffix_pattern=cfg.suffix_pattern)
+        scan = scan_multi_folders(folder_entries, suffix_pattern=cfg.suffix_pattern)
         matches = scan.matches
 
         if self.pair_keys:
@@ -97,7 +94,7 @@ class BatchRunner:
 
             raw = vision_message(
                 static_files,
-                [match.left, match.right],
+                match.file_list,
                 preamble=self.recipe.preamble,
                 settings=self.settings,
             )
@@ -158,8 +155,7 @@ class BatchRunner:
             "pairs_preview": [
                 {
                     "key": m.key,
-                    "left": str(m.left),
-                    "right": str(m.right),
+                    "files": {label: str(path) for label, path in m.files.items()},
                     "output": str(self._output_path(m.key)),
                     "exists": self._output_path(m.key).exists(),
                 }

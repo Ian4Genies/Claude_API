@@ -3,18 +3,20 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from src.batch.pairing import scan_pair_folders
-from src.batch.recipe import BatchRecipe, PairFolderConfig, load_recipe, save_recipe
+from src.batch.pairing import scan_multi_folders
+from src.batch.recipe import BatchRecipe, FolderEntry, PairFolderConfig, load_recipe, save_recipe
 from src.batch.runner import BatchRunner
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
 RECIPES = ROOT / "recipes"
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+TEXT_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml"}
 
 app = FastAPI(title="Claude Batch Runner")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -23,9 +25,13 @@ _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
 
+class FolderSpec(BaseModel):
+    label: str
+    path: str
+
+
 class ScanRequest(BaseModel):
-    left_folder: str
-    right_folder: str
+    folders: list[FolderSpec]
     suffix_pattern: str = r"_grp_head_view_\d+$"
 
 
@@ -36,8 +42,7 @@ class FolderInspectRequest(BaseModel):
 class RecipePayload(BaseModel):
     name: str = "custom_recipe"
     static_files: list[str] = Field(default_factory=list)
-    left_folder: str = ""
-    right_folder: str = ""
+    folders: list[FolderSpec] = Field(default_factory=list)
     suffix_pattern: str = r"_grp_head_view_\d+$"
     output_dir: str = "output"
     output_naming: str = "{pair_key}.json"
@@ -52,10 +57,9 @@ class RunRequest(RecipePayload):
 
 def _to_recipe(payload: RecipePayload) -> BatchRecipe:
     pair_folders = None
-    if payload.left_folder and payload.right_folder:
+    if len(payload.folders) >= 2:
         pair_folders = PairFolderConfig(
-            left=payload.left_folder,
-            right=payload.right_folder,
+            folders=[FolderEntry(label=f.label, path=f.path) for f in payload.folders],
             suffix_pattern=payload.suffix_pattern,
         )
     return BatchRecipe(
@@ -74,9 +78,73 @@ def _resolve(path_str: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _rel_path(path: Path) -> str:
+    root = ROOT.resolve()
+    resolved = path.resolve()
+    if resolved == root:
+        return ""
+    return str(resolved.relative_to(root)).replace("\\", "/")
+
+
+SKIP_DIR_NAMES = {".git", ".venv", "venv", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+
+
+def _safe_path(path_str: str) -> Path:
+    resolved = _resolve(path_str).resolve()
+    root = ROOT.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise HTTPException(403, "Path outside project root")
+    return resolved
+
+
+def _recipe_payload(recipe: BatchRecipe) -> dict:
+    folders = []
+    if recipe.pair_folders:
+        folders = [
+            {"label": entry.label, "path": entry.path}
+            for entry in recipe.pair_folders.folders
+        ]
+    return RecipePayload(
+        name=recipe.name,
+        static_files=recipe.static_files,
+        folders=folders,
+        suffix_pattern=recipe.pair_folders.suffix_pattern if recipe.pair_folders else r"_grp_head_view_\d+$",
+        output_dir=recipe.output_dir,
+        output_naming=recipe.output_naming,
+        skip_existing=recipe.skip_existing,
+        preamble=recipe.preamble,
+    ).model_dump()
+
+
 @app.get("/")
 async def index():
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/api/browse")
+async def browse(path: str = Query(default="")):
+    target = ROOT.resolve() if not path else _safe_path(path)
+    if not target.is_dir():
+        raise HTTPException(400, "Not a directory")
+
+    root = ROOT.resolve()
+    rel = _rel_path(target)
+    parent = _rel_path(target.parent) if target != root else None
+
+    entries = []
+    for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        if item.name in SKIP_DIR_NAMES:
+            continue
+        if item.is_dir() and item.name.startswith("."):
+            continue
+        entries.append({
+            "name": item.name,
+            "path": _rel_path(item),
+            "kind": "dir" if item.is_dir() else "file",
+            "is_image": item.suffix.lower() in IMAGE_SUFFIXES,
+        })
+
+    return {"path": rel, "parent": parent, "entries": entries}
 
 
 @app.get("/api/recipes")
@@ -92,19 +160,29 @@ async def get_recipe(name: str):
     path = RECIPES / f"{name}.yaml"
     if not path.exists():
         raise HTTPException(404, "Recipe not found")
-    recipe = load_recipe(path)
-    payload = RecipePayload(
-        name=recipe.name,
-        static_files=recipe.static_files,
-        left_folder=recipe.pair_folders.left if recipe.pair_folders else "",
-        right_folder=recipe.pair_folders.right if recipe.pair_folders else "",
-        suffix_pattern=recipe.pair_folders.suffix_pattern if recipe.pair_folders else r"_grp_head_view_\d+$",
-        output_dir=recipe.output_dir,
-        output_naming=recipe.output_naming,
-        skip_existing=recipe.skip_existing,
-        preamble=recipe.preamble,
-    )
-    return payload.model_dump()
+    return _recipe_payload(load_recipe(path))
+
+
+@app.get("/api/media")
+async def media(path: str = Query(...)):
+    resolved = _safe_path(path)
+    if not resolved.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(resolved)
+
+
+@app.get("/api/file-meta")
+async def file_meta(path: str = Query(...)):
+    resolved = _safe_path(path)
+    if not resolved.is_file():
+        raise HTTPException(404, "File not found")
+    suffix = resolved.suffix.lower()
+    return {
+        "path": path,
+        "name": resolved.name,
+        "kind": "image" if suffix in IMAGE_SUFFIXES else "text" if suffix in TEXT_SUFFIXES else "file",
+        "preview_url": f"/api/media?path={path}" if suffix in IMAGE_SUFFIXES else None,
+    }
 
 
 @app.post("/api/inspect-folder")
@@ -115,36 +193,53 @@ async def inspect_folder(req: FolderInspectRequest):
 
     files = sorted(
         p for p in folder.iterdir()
-        if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
     )
+    rel = lambda p: str(p.relative_to(ROOT)).replace("\\", "/") if p.is_relative_to(ROOT) else str(p)
     stems = [p.stem for p in files]
     return {
         "folder": str(folder),
         "count": len(files),
         "files": [p.name for p in files[:100]],
         "sample_stems": stems[:20],
+        "sample_previews": [
+            {"name": p.name, "path": rel(p), "preview_url": f"/api/media?path={rel(p)}"}
+            for p in files[:8]
+        ],
     }
 
 
 @app.post("/api/scan-pairs")
 async def scan_pairs(req: ScanRequest):
-    left = _resolve(req.left_folder)
-    right = _resolve(req.right_folder)
-    if not left.is_dir() or not right.is_dir():
-        raise HTTPException(400, "Both folders must exist")
+    if len(req.folders) < 2:
+        raise HTTPException(400, "At least two folders required")
 
-    result = scan_pair_folders(left, right, suffix_pattern=req.suffix_pattern)
+    entries: list[tuple[str, Path]] = []
+    for spec in req.folders:
+        folder = _resolve(spec.path)
+        if not folder.is_dir():
+            raise HTTPException(400, f"Not a directory: {folder}")
+        entries.append((spec.label, folder))
+
+    result = scan_multi_folders(entries, suffix_pattern=req.suffix_pattern)
+    rel = lambda p: str(p.relative_to(ROOT)).replace("\\", "/") if p.is_relative_to(ROOT) else str(p)
+
     return {
         "match_count": result.match_count,
-        "left_only_count": len(result.left_only),
-        "right_only_count": len(result.right_only),
+        "orphan_counts": {label: len(files) for label, files in result.orphans.items()},
         "is_clean": result.is_clean,
+        "folder_labels": [label for label, _ in result.folders],
         "matches": [
-            {"key": m.key, "left": str(m.left), "right": str(m.right)}
+            {
+                "key": m.key,
+                "files": {label: rel(path) for label, path in m.files.items()},
+            }
             for m in result.matches
         ],
-        "left_only": [str(p) for p in result.left_only[:50]],
-        "right_only": [str(p) for p in result.right_only[:50]],
+        "orphans": {
+            label: [rel(p) for p in files[:30]]
+            for label, files in result.orphans.items()
+        },
     }
 
 
@@ -197,7 +292,7 @@ def _run_job(job_id: str, req: RunRequest) -> None:
 
 
 @app.post("/api/run")
-async def run_batch(req: RunRequest, background: BackgroundTasks):
+async def run_batch(req: RunRequest):
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = {
