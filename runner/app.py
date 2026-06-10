@@ -1,20 +1,26 @@
+import asyncio
+import json
 import threading
 import uuid
 from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from src.batch.history import JobHistory
+from src.batch.validate import validate_api_key
 from src.batch.pairing import scan_multi_folders
 from src.batch.recipe import BatchRecipe, FolderEntry, PairFolderConfig, load_recipe, save_recipe
 from src.batch.runner import BatchRunner
+from src.env_file import api_key_status, save_api_key
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
 RECIPES = ROOT / "recipes"
+HISTORY_DB = ROOT / "output" / "jobs.db"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml"}
 
@@ -23,6 +29,9 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+_cancel: dict[str, threading.Event] = {}
+_active_job_id: str | None = None
+_history = JobHistory(HISTORY_DB)
 
 
 class FolderSpec(BaseModel):
@@ -48,11 +57,18 @@ class RecipePayload(BaseModel):
     output_naming: str = "{pair_key}.json"
     skip_existing: bool = True
     preamble: str | None = None
+    model: str | None = None
+    max_workers: int | None = None
 
 
 class RunRequest(RecipePayload):
     limit: int | None = None
     pair_keys: list[str] | None = None
+    retry_failed: bool = False
+
+
+class ApiKeyPayload(BaseModel):
+    api_key: str
 
 
 def _to_recipe(payload: RecipePayload) -> BatchRecipe:
@@ -70,6 +86,8 @@ def _to_recipe(payload: RecipePayload) -> BatchRecipe:
         output_naming=payload.output_naming,
         skip_existing=payload.skip_existing,
         preamble=payload.preamble,
+        model=payload.model,
+        max_workers=payload.max_workers,
     )
 
 
@@ -113,12 +131,51 @@ def _recipe_payload(recipe: BatchRecipe) -> dict:
         output_naming=recipe.output_naming,
         skip_existing=recipe.skip_existing,
         preamble=recipe.preamble,
+        model=recipe.model,
+        max_workers=recipe.max_workers,
     ).model_dump()
 
 
 @app.get("/")
 async def index():
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/api/config")
+async def get_config():
+    return api_key_status()
+
+
+@app.post("/api/config/api-key")
+async def set_api_key(payload: ApiKeyPayload):
+    try:
+        save_api_key(payload.api_key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    check = validate_api_key(payload.api_key)
+    status = api_key_status()
+    status["valid"] = check["valid"]
+    if not check["valid"]:
+        status["error"] = check["error"]
+    return status
+
+
+@app.post("/api/config/validate")
+async def validate_key():
+    check = validate_api_key()
+    status = api_key_status()
+    status["valid"] = check["valid"]
+    if not check["valid"]:
+        status["error"] = check["error"]
+    return status
+
+
+@app.get("/api/manifest")
+async def get_manifest(output_dir: str = Query(default="output")):
+    manifest_path = _resolve(output_dir) / "latest_manifest.json"
+    if not manifest_path.is_file():
+        raise HTTPException(404, "No manifest found for this output directory")
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
 @app.get("/api/browse")
@@ -253,48 +310,108 @@ async def dry_run(req: RecipePayload):
         raise HTTPException(400, str(exc)) from exc
 
 
-def _run_job(job_id: str, req: RunRequest) -> None:
+def _failed_keys(recipe_name: str, output_dir: str) -> list[str]:
+    keys = _history.failed_keys(recipe_name)
+    if keys:
+        return keys
+    manifest = _resolve(output_dir) / "latest_manifest.json"
+    if not manifest.is_file():
+        return []
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    return [i["pair_key"] for i in data.get("items", []) if i.get("status") == "error"]
+
+
+@app.get("/api/failed-count")
+async def failed_count(
+    recipe: str = Query(...),
+    output_dir: str = Query(default="output"),
+):
+    return {"count": len(_failed_keys(recipe, output_dir))}
+
+
+def _run_job(job_id: str, req: RunRequest, cancel_event: threading.Event) -> None:
+    global _active_job_id
     recipe = _to_recipe(req)
     runner = BatchRunner(
         recipe,
         base_dir=ROOT,
         limit=req.limit,
         pair_keys=req.pair_keys,
+        retry_failed=req.retry_failed,
+        job_id=job_id,
+        history=_history,
+        cancel_event=cancel_event,
     )
 
     def on_progress(current: int, total: int, item) -> None:
+        payload = asdict(item)
         with _jobs_lock:
             job = _jobs[job_id]
             job["current"] = current
             job["total"] = total
-            job["items"].append(asdict(item))
-            if item.status == "ok":
-                job["succeeded"] += 1
-            elif item.skipped:
+            job["items"].append(payload)
+            job["input_tokens"] = job.get("input_tokens", 0) + item.input_tokens
+            job["output_tokens"] = job.get("output_tokens", 0) + item.output_tokens
+            job["cache_read_tokens"] = job.get("cache_read_tokens", 0) + item.cache_read_input_tokens
+            job["cost_usd"] = round(job.get("cost_usd", 0) + item.cost_usd, 6)
+            if item.skipped:
                 job["skipped"] += 1
+            elif item.status == "ok":
+                job["succeeded"] += 1
             else:
                 job["failed"] += 1
 
     try:
+        with _jobs_lock:
+            _jobs[job_id]["total"] = len(runner._resolve_pairs())
         result = runner.run_all(on_progress=on_progress)
         with _jobs_lock:
-            _jobs[job_id]["status"] = "done"
+            cancelled = cancel_event.is_set()
+            _jobs[job_id]["status"] = "cancelled" if cancelled else "done"
             _jobs[job_id]["result"] = {
                 "total": result.total,
                 "succeeded": result.succeeded,
                 "failed": result.failed,
                 "skipped": result.skipped,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "cache_read_input_tokens": result.cache_read_input_tokens,
+                "cost_usd": round(result.cost_usd, 6),
+                "manifest_path": result.manifest_path,
             }
     except Exception as exc:
         with _jobs_lock:
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"] = str(exc)
+    finally:
+        with _jobs_lock:
+            if _active_job_id == job_id:
+                _active_job_id = None
+            _cancel.pop(job_id, None)
 
 
 @app.post("/api/run")
 async def run_batch(req: RunRequest):
-    job_id = str(uuid.uuid4())
+    global _active_job_id
+
+    key_check = validate_api_key(model=req.model)
+    if not key_check["valid"]:
+        raise HTTPException(400, key_check["error"])
+
+    if req.retry_failed:
+        failed = _failed_keys(req.name, req.output_dir)
+        if not failed:
+            raise HTTPException(400, "No failed pairs to retry — run a batch first or check manifest")
+
     with _jobs_lock:
+        if _active_job_id and _active_job_id in _cancel:
+            _cancel[_active_job_id].set()
+
+    job_id = str(uuid.uuid4())
+    cancel_event = threading.Event()
+    with _jobs_lock:
+        _active_job_id = job_id
+        _cancel[job_id] = cancel_event
         _jobs[job_id] = {
             "status": "running",
             "current": 0,
@@ -302,12 +419,76 @@ async def run_batch(req: RunRequest):
             "succeeded": 0,
             "failed": 0,
             "skipped": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cost_usd": 0.0,
             "items": [],
         }
 
-    thread = threading.Thread(target=_run_job, args=(job_id, req), daemon=True)
+    thread = threading.Thread(target=_run_job, args=(job_id, req, cancel_event), daemon=True)
     thread.start()
     return {"job_id": job_id}
+
+
+@app.post("/api/run/{job_id}/cancel")
+async def cancel_run(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        if job["status"] != "running":
+            return {"job_id": job_id, "status": job["status"]}
+        if job_id in _cancel:
+            _cancel[job_id].set()
+    return {"job_id": job_id, "status": "cancelling"}
+
+
+@app.get("/api/run/{job_id}/stream")
+async def stream_job(job_id: str):
+    async def events():
+        seen = 0
+        while True:
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+            if not job:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'not found'})}\n\n"
+                return
+            if len(job["items"]) > seen:
+                for item in job["items"][seen:]:
+                    yield f"data: {json.dumps({'type': 'item', 'item': item})}\n\n"
+                seen = len(job["items"])
+            payload = {
+                "type": "status",
+                "status": job["status"],
+                "current": job["current"],
+                "total": job["total"],
+                "succeeded": job["succeeded"],
+                "failed": job["failed"],
+                "skipped": job["skipped"],
+                "input_tokens": job.get("input_tokens", 0),
+                "output_tokens": job.get("output_tokens", 0),
+                "cache_read_tokens": job.get("cache_read_tokens", 0),
+                "cost_usd": job.get("cost_usd", 0),
+            }
+            if job.get("result"):
+                payload["result"] = job["result"]
+            if job.get("error"):
+                payload["error"] = job["error"]
+            yield f"data: {json.dumps(payload)}\n\n"
+            if job["status"] in ("done", "error", "cancelled"):
+                return
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.get("/api/history/{job_id}")
+async def job_history(job_id: str):
+    data = _history.get_job(job_id)
+    if not data:
+        raise HTTPException(404, "Job not found")
+    return data
 
 
 @app.get("/api/run/{job_id}")

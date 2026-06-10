@@ -176,6 +176,8 @@ input:focus, select:focus {
   color: var(--accent);
   font-weight: 600;
 }
+.chip.ok-chip { background: rgba(61, 220, 132, 0.14); color: var(--ok); }
+.chip.warn-chip { background: rgba(255, 190, 77, 0.14); color: var(--warn); }
 
 .check-row {
   display: flex;
@@ -218,6 +220,12 @@ button:not(:disabled):active { transform: scale(0.98); }
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   border: 1px solid var(--panel-border);
+}
+
+.btn-danger {
+  background: rgba(255, 90, 90, 0.15);
+  color: #ff8a8a;
+  border: 1px solid rgba(255, 90, 90, 0.35);
 }
 
 .btn-ghost {
@@ -589,4 +597,45 @@ tbody tr.active { background: rgba(91, 157, 255, 0.08); }
 }
 
 .modal-btns button { flex: 0 0 auto; }
+
+.settings-section {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+  margin-bottom: 0.75rem;
+}
+
+.run-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.manifest-modal { width: min(720px, 96vw); }
+
+.manifest-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.manifest-summary .pill {
+  font-size: 0.72rem;
+  padding: 0.3rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--panel-border);
+  color: var(--muted);
+}
+
+.manifest-table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  max-height: 360px;
+}
 

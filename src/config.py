@@ -11,6 +11,7 @@ class Settings:
     api_key: str
     model: str
     max_tokens: int
+    max_workers: int
 
 
 def get_settings() -> Settings:
@@ -20,6 +21,7 @@ def get_settings() -> Settings:
 
     return Settings(
         api_key=api_key,
-        model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+        model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
         max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096")),
+        max_workers=int(os.getenv("ANTHROPIC_MAX_WORKERS", "3")),
     )

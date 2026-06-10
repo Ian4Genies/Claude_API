@@ -33,6 +33,8 @@ class BatchRecipe:
     output_naming: str = "{pair_key}.json"
     skip_existing: bool = True
     preamble: str | None = None
+    model: str | None = None
+    max_workers: int | None = None
 
     def resolved_static_files(self, base: Path | None = None) -> list[Path]:
         root = base or Path.cwd()
@@ -93,6 +95,8 @@ def load_recipe(path: Path | str) -> BatchRecipe:
         output_naming=data.get("output_naming", "{pair_key}.json"),
         skip_existing=bool(data.get("skip_existing", True)),
         preamble=data.get("preamble"),
+        model=data.get("model"),
+        max_workers=data.get("max_workers"),
     )
 
 
@@ -104,6 +108,10 @@ def save_recipe(recipe: BatchRecipe, path: Path | str) -> None:
         "output_naming": recipe.output_naming,
         "skip_existing": recipe.skip_existing,
     }
+    if recipe.model:
+        payload["model"] = recipe.model
+    if recipe.max_workers:
+        payload["max_workers"] = recipe.max_workers
     if recipe.preamble:
         payload["preamble"] = recipe.preamble
     if recipe.pair_folders:

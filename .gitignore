@@ -11,4 +11,5 @@ build/
 .ruff_cache/
 *.log
 output/
+output/jobs.db
 data/

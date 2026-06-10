@@ -15,6 +15,14 @@ Set `ANTHROPIC_API_KEY` in `.env`.
 
 ## Batch Runner UI
 
+**Restart (easiest):** double-click `restart-ui.bat` or run:
+
+```powershell
+.\restart-ui.ps1
+```
+
+**Manual start:**
+
 ```bash
 uvicorn runner.app:app --reload
 ```

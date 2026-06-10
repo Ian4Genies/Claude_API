@@ -31,6 +31,17 @@
 
   <main class="layout">
     <aside class="panel sidebar">
+      <div class="section settings-section">
+        <div class="section-head">
+          <label>API key</label>
+          <span class="chip" id="apiKeyStatus">—</span>
+        </div>
+        <div class="row">
+          <input id="apiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off" />
+          <button class="btn-secondary" id="saveApiKeyBtn">Save</button>
+        </div>
+      </div>
+
       <div class="panel-head">
         <h2>Recipe</h2>
       </div>
@@ -78,6 +89,8 @@
       <div class="actions sticky-actions">
         <button class="btn-secondary" id="scanBtn">Scan</button>
         <button class="btn-secondary" id="dryRunBtn">Dry Run</button>
+        <button class="btn-secondary" id="retryFailedBtn">Retry Failed</button>
+        <button class="btn-danger" id="stopBtn" disabled>Stop</button>
         <button class="btn-primary" id="runBtn">Run Batch</button>
       </div>
     </aside>
@@ -93,7 +106,10 @@
       </div>
 
       <div class="progress"><div id="progressBar"></div></div>
-      <div id="runSummary" class="hint"></div>
+      <div class="run-bar">
+        <div id="runSummary" class="hint"></div>
+        <button class="btn-ghost sm" id="viewManifestBtn">View manifest</button>
+      </div>
 
       <div class="table-wrap">
         <table>
@@ -138,6 +154,27 @@
           <button class="btn-ghost" id="browseSelectFolderBtn">Select folder</button>
           <button class="btn-primary" id="browseConfirmBtn">Select</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="manifestModal">
+    <div class="modal panel manifest-modal">
+      <div class="modal-head">
+        <div>
+          <h3>Run manifest</h3>
+          <p class="hint" id="manifestMeta">—</p>
+        </div>
+        <button class="icon-btn sm" id="manifestCloseBtn">×</button>
+      </div>
+      <div class="manifest-summary" id="manifestSummary"></div>
+      <div class="manifest-table-wrap">
+        <table>
+          <thead>
+            <tr><th>Key</th><th>Status</th><th>Tokens</th><th>Cost</th></tr>
+          </thead>
+          <tbody id="manifestBody"></tbody>
+        </table>
       </div>
     </div>
   </div>

@@ -10,6 +10,8 @@ const state = {
   selectedPairKey: null,
   selectedStatic: null,
   suppressHistory: false,
+  recipeModel: null,
+  recipeWorkers: null,
 };
 
 const history = { past: [], future: [], limit: 60 };
@@ -371,7 +373,7 @@ function mutate(fn) {
   commitHistory();
 }
 
-function payload() {
+function payload(extra = {}) {
   const limitRaw = $("runLimit").value.trim();
   return {
     name: $("recipeName").value.trim(),
@@ -382,6 +384,9 @@ function payload() {
     output_naming: $("outputNaming").value.trim(),
     skip_existing: $("skipExisting").checked,
     limit: limitRaw ? Number(limitRaw) : null,
+    ...(state.recipeModel ? { model: state.recipeModel } : {}),
+    ...(state.recipeWorkers ? { max_workers: state.recipeWorkers } : {}),
+    ...extra,
   };
 }
 
@@ -464,6 +469,8 @@ async function loadRecipe(name) {
   $("outputDir").value = data.output_dir || "output";
   $("outputNaming").value = data.output_naming || "{pair_key}.json";
   $("skipExisting").checked = data.skip_existing !== false;
+  state.recipeModel = data.model || null;
+  state.recipeWorkers = data.max_workers || null;
   renderStaticFiles();
   renderFolders();
   history.past = [snapshot()];
@@ -504,39 +511,226 @@ async function dryRun() {
   if (data.static_missing.length) log(`Missing: ${data.static_missing.join(", ")}`);
 }
 
-async function pollJob(jobId, totalHint) {
-  while (true) {
-    const res = await fetch(`/api/run/${jobId}`);
-    const job = await res.json();
-    const total = job.total || totalHint || 1;
-    $("progressBar").style.width = `${total ? Math.round((job.current / total) * 100) : 0}%`;
-    $("runSummary").textContent = `Running ${job.current}/${total} · ok ${job.succeeded} · skipped ${job.skipped} · failed ${job.failed}`;
-    job.items.forEach((item) => {
-      state.pairStatus[item.pair_key] = item.skipped ? "skipped" : item.status;
-    });
-    renderPairs();
-    if (job.status === "done") {
-      log(`Done. ok=${job.result.succeeded} skipped=${job.result.skipped} failed=${job.result.failed}`);
-      return;
-    }
-    if (job.status === "error") {
-      log(`Job error: ${job.error}`);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 1200));
+async function loadApiKeyStatus() {
+  const res = await fetch("/api/config/validate", { method: "POST" });
+  if (!res.ok) {
+    $("apiKeyStatus").textContent = "restart UI";
+    $("apiKeyStatus").className = "chip warn-chip";
+    return;
+  }
+  const data = await res.json();
+  const el = $("apiKeyStatus");
+  if (!data.configured) {
+    el.textContent = "not set";
+    el.className = "chip warn-chip";
+  } else if (data.valid === false) {
+    el.textContent = "invalid";
+    el.className = "chip warn-chip";
+  } else {
+    el.textContent = data.masked;
+    el.className = "chip ok-chip";
   }
 }
 
-async function runBatch() {
-  $("runBtn").disabled = true;
+async function saveApiKey() {
+  const key = $("apiKeyInput").value.trim();
+  if (!key) return;
+  const res = await fetch("/api/config/api-key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: key }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const msg = data.detail || "Save failed";
+    throw new Error(msg === "Not Found" ? "Server outdated — run restart-ui.bat" : msg);
+  }
+  $("apiKeyInput").value = "";
+  await loadApiKeyStatus();
+  if (data.valid === false) {
+    log(`API key saved but invalid: ${data.error}`);
+  } else {
+    log("API key saved and verified");
+  }
+}
+
+function renderManifest(data) {
+  const s = data.summary || {};
+  $("manifestMeta").textContent = `${data.recipe || "—"} · ${data.model || "—"}`;
+  $("manifestSummary").innerHTML = [
+    ["Total", s.total],
+    ["OK", s.succeeded],
+    ["Skipped", s.skipped],
+    ["Failed", s.failed],
+    ["Cost", s.cost_usd != null ? `$${Number(s.cost_usd).toFixed(4)}` : "—"],
+    ["Cache read", s.cache_read_input_tokens || 0],
+  ].map(([k, v]) => `<span class="pill">${k}: ${v}</span>`).join("");
+
+  const body = $("manifestBody");
+  body.innerHTML = "";
+  (data.items || []).forEach((item) => {
+    const tr = document.createElement("tr");
+    const tokens = item.input_tokens ? `${item.input_tokens}/${item.output_tokens}` : "—";
+    const cost = item.cost_usd ? `$${Number(item.cost_usd).toFixed(4)}` : "—";
+    tr.innerHTML = `
+      <td>${item.pair_key}</td>
+      <td><span class="badge ${item.status === "ok" ? "ok" : item.status === "error" ? "err" : "warn"}">${item.status}</span></td>
+      <td>${tokens}</td>
+      <td>${cost}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function viewManifest() {
+  const outputDir = $("outputDir").value.trim() || "output";
+  const res = await fetch(`/api/manifest?output_dir=${encodeURIComponent(outputDir)}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "No manifest");
+  renderManifest(data);
+  $("manifestModal").classList.remove("hidden");
+}
+
+function closeManifest() {
+  $("manifestModal").classList.add("hidden");
+}
+
+function shortError(msg, limit = 200) {
+  if (!msg) return "unknown";
+  if (msg.includes("Invalid API key")) return msg;
+  if (msg.includes("<html")) return "API gateway error (502) — retry in a moment";
+  if (msg === "Connection error." || msg.includes("Network connection")) {
+    return "Network error reaching Anthropic — check internet/VPN";
+  }
+  return msg.length > limit ? msg.slice(0, limit) + "…" : msg;
+}
+
+function applyJobStatus(data) {
+  const total = data.total || 1;
+  $("progressBar").style.width = `${total ? Math.round((data.current / total) * 100) : 0}%`;
+  const cost = data.cost_usd != null ? ` · $${Number(data.cost_usd).toFixed(4)}` : "";
+  const cache = data.cache_read_tokens ? ` · cache ${data.cache_read_tokens}` : "";
+  $("runSummary").textContent =
+    `${data.current}/${total} · ok ${data.succeeded} · skip ${data.skipped} · fail ${data.failed}${cost}${cache}`;
+}
+
+function streamJob(jobId) {
+  return new Promise((resolve, reject) => {
+    let seen = 0;
+    let errorCount = 0;
+    let firstError = null;
+    let stopped = false;
+
+    const finish = (fn, value) => {
+      if (stopped) return;
+      stopped = true;
+      fn(value);
+    };
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetch(`/api/run/${jobId}`);
+        const job = await res.json();
+        if (!res.ok) throw new Error(job.detail || "Job not found");
+
+        while (seen < job.items.length) {
+          const item = job.items[seen++];
+          state.pairStatus[item.pair_key] = item.skipped ? "skipped" : item.status;
+          if (item.status === "error" && item.error) {
+            errorCount += 1;
+            if (!firstError) firstError = `${item.pair_key}: ${shortError(item.error)}`;
+          }
+        }
+        renderPairs();
+        applyJobStatus({
+          current: job.current,
+          total: job.total,
+          succeeded: job.succeeded,
+          failed: job.failed,
+          skipped: job.skipped,
+          cost_usd: job.cost_usd,
+          cache_read_tokens: job.cache_read_tokens,
+        });
+
+        if (job.status === "done") {
+          const r = job.result || {};
+          if (errorCount > 0) {
+            log(`${errorCount} failed — ${firstError}${errorCount > 1 ? ` (+${errorCount - 1} more)` : ""}`);
+            log("See View manifest for full details");
+          }
+          log(`Done. ok=${r.succeeded} skip=${r.skipped} fail=${r.failed} cost=$${Number(r.cost_usd || 0).toFixed(4)}`);
+          if (r.manifest_path) log(`Manifest: ${r.manifest_path}`);
+          state.lastManifest = r.manifest_path;
+          finish(resolve, job);
+          return;
+        }
+        if (job.status === "cancelled") {
+          const r = job.result || {};
+          log(`Stopped at ${job.current}/${job.total} · ok ${r.succeeded} · fail ${r.failed}`);
+          finish(resolve, job);
+          return;
+        }
+        if (job.status === "error") {
+          log(`Job error: ${shortError(job.error)}`);
+          finish(resolve, job);
+          return;
+        }
+        setTimeout(poll, 400);
+      } catch (err) {
+        finish(reject, err);
+      }
+    };
+
+    poll();
+  });
+}
+
+let activeJobId = null;
+
+async function stopBatch() {
+  if (!activeJobId) return;
+  $("stopBtn").disabled = true;
   try {
-    log("Starting batch...");
-    const data = await api("/api/run", payload());
-    await pollJob(data.job_id, Number($("statMatches")?.textContent) || state.matches.length);
+    const res = await fetch(`/api/run/${activeJobId}/cancel`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    log("Stopping batch...");
+  } catch (err) {
+    log(`Stop failed: ${err.message}`);
+  }
+}
+
+async function runBatch(retryFailed = false) {
+  $("runBtn").disabled = true;
+  $("retryFailedBtn").disabled = true;
+  $("stopBtn").disabled = false;
+  try {
+    if (retryFailed) {
+      const params = new URLSearchParams({
+        recipe: $("recipeName").value.trim(),
+        output_dir: $("outputDir").value.trim() || "output",
+      });
+      const check = await fetch(`/api/failed-count?${params}`);
+      const checkData = await check.json();
+      if (!check.ok) throw new Error(checkData.detail || JSON.stringify(checkData));
+      if (!checkData.count) {
+        log("No failed pairs to retry.");
+        return;
+      }
+      log(`Retrying ${checkData.count} failed pair(s)...`);
+    } else {
+      log("Starting batch...");
+    }
+    const data = await api("/api/run", payload({ retry_failed: retryFailed }));
+    activeJobId = data.job_id;
+    await streamJob(data.job_id);
   } catch (err) {
     log(`Error: ${err.message}`);
   } finally {
+    activeJobId = null;
     $("runBtn").disabled = false;
+    $("retryFailedBtn").disabled = false;
+    $("stopBtn").disabled = true;
   }
 }
 
@@ -580,9 +774,15 @@ $("addFolderBtn").onclick = () => {
 
 $("undoBtn").onclick = undo;
 $("redoBtn").onclick = redo;
+$("saveApiKeyBtn").onclick = () => saveApiKey().catch((e) => log(e.message));
+$("viewManifestBtn").onclick = () => viewManifest().catch((e) => log(e.message));
+$("manifestCloseBtn").onclick = closeManifest;
+$("manifestModal").onclick = (e) => { if (e.target === $("manifestModal")) closeManifest(); };
 $("scanBtn").onclick = () => scanPairs().catch((e) => log(e.message));
 $("dryRunBtn").onclick = () => dryRun().catch((e) => log(e.message));
-$("runBtn").onclick = () => runBatch();
+$("runBtn").onclick = () => runBatch(false);
+$("retryFailedBtn").onclick = () => runBatch(true);
+$("stopBtn").onclick = () => stopBatch();
 $("loadRecipeBtn").onclick = () => loadRecipe($("recipeSelect").value).then(() => scanPairs()).catch((e) => log(e.message));
 $("saveRecipeBtn").onclick = () => saveRecipe().catch((e) => log(e.message));
 $("clearPreviewBtn").onclick = () => {
@@ -600,9 +800,13 @@ document.querySelectorAll("[data-track]").forEach((el) => {
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.key === "z") { e.preventDefault(); undo(); }
   if (e.ctrlKey && e.key === "y") { e.preventDefault(); redo(); }
-  if (e.key === "Escape" && !$("browseModal").classList.contains("hidden")) closeBrowse();
+  if (e.key === "Escape") {
+    if (!$("browseModal").classList.contains("hidden")) closeBrowse();
+    if (!$("manifestModal").classList.contains("hidden")) closeManifest();
+  }
 });
 
+loadApiKeyStatus();
 loadRecipes()
   .then(() => loadRecipe("prompt_01_head_tagging"))
   .then(() => scanPairs())
